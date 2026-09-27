@@ -350,10 +350,9 @@ impl<'sock, D: Disk> FileScheme<'sock, D> {
                             return Err(Error::new(EACCES));
                         }
 
-                        let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                        self.fs.tx(|tx| {
-                            tx.truncate_node(node_ptr, 0, mtime.as_secs(), mtime.subsec_nanos())
-                        })?;
+                        let fmaps = &mut self.fmap;
+                        self.fs
+                            .tx(|tx| crate::fmap::truncate(fmaps, node_ptr, 0, tx))?;
                     }
 
                     Handle::ResourceFile((
@@ -915,7 +914,8 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
     fn ftruncate(&mut self, id: usize, len: u64, _ctx: &CallerCtx) -> Result<()> {
         // println!("Ftruncate {}, {}", id, len);
         let file = Handle::get_resource_mut(self.handles.get_mut(&id))?;
-        self.fs.tx(|tx| file.truncate(len, tx))
+        let fmaps = &mut self.fmap;
+        self.fs.tx(|tx| file.truncate(fmaps, len, tx))
     }
 
     fn futimens(&mut self, id: usize, times: &[TimeSpec], _ctx: &CallerCtx) -> Result<()> {
@@ -986,10 +986,8 @@ impl<'sock, D: Disk> SchemeSync for FileScheme<'sock, D> {
                 log::error!("failed to close node {}: {}", node_ptr.id(), err);
             }
 
-            /*TODO: leaks memory, but why?
-            // Remove from fmap list
+            // Remove from fmap list, releasing its buffer
             self.fmap.remove(&node_ptr.id());
-            */
         }
     }
 

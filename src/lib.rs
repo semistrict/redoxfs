@@ -52,6 +52,8 @@ mod clone;
 mod dir;
 mod disk;
 mod filesystem;
+#[cfg(feature = "std")]
+pub mod fmap;
 mod header;
 mod htree;
 mod key;

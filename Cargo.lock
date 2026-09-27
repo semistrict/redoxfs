@@ -293,6 +293,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
 
 [[package]]
+name = "mach2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d28e293f2b8c9d2b2d1c0193bd3c1cbdc0d2cf396888dc01162f7cf9d6c3f3"
+
+[[package]]
 name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -413,12 +419,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
-name = "range-tree"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "384c2842d4e069d5ccacf5fe1dca4ef8d07a5444329715f0fc3c61813502d4d1"
-
-[[package]]
 name = "redox-buffer-pool"
 version = "0.6.0"
 source = "git+https://gitlab.redox-os.org/redox-os/redox-buffer-pool.git#259719734304f6d2138b8b910fbdac663ebe6ff0"
@@ -492,8 +492,8 @@ dependencies = [
  "libredox",
  "log",
  "lz4_flex",
+ "mach2",
  "parse-size",
- "range-tree",
  "redox-buffer-pool",
  "redox-path",
  "redox-rings",
