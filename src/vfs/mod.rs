@@ -14,7 +14,7 @@ use alloc::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use syscall::error::{Error, Result, EINVAL, EISDIR, ENAMETOOLONG, ENOTDIR, EPERM};
+use syscall::error::{EINVAL, EISDIR, ENAMETOOLONG, ENOTDIR, EPERM};
 use syscall::flag::{PROT_READ, PROT_WRITE};
 use syscall::PAGE_SIZE;
 
@@ -23,6 +23,8 @@ use crate::{Disk, FileSystem, Node, TreeData, TreePtr, BLOCK_SIZE, DIR_ENTRY_MAX
 
 use self::dax::Grant;
 pub use self::dax::{DaxWindow, MapSource};
+/// Errors carry Linux errno values.
+pub use syscall::error::{Error, Result};
 
 mod dax;
 #[cfg(test)]
