@@ -95,8 +95,6 @@ redox-path = "0.4.1"
 redox-scheme = { version = "0.11.4", optional = true }
 redox-buffer-pool = { git = "https://gitlab.redox-os.org/redox-os/redox-buffer-pool.git" }
 
-[target.'cfg(target_vendor = "apple")'.dependencies]
-mach2 = "0.7.0"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }

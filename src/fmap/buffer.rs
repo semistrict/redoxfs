@@ -231,26 +231,19 @@ impl FmapBuffer {
     }
 
     /// Try to extend the reservation to `reserved` bytes without moving it.
-    #[cfg(target_vendor = "apple")]
     fn extend_in_place(&mut self, reserved: usize) -> bool {
-        // VM_FLAGS_FIXED without VM_FLAGS_OVERWRITE fails rather than
-        // clobbering anything already mapped after the buffer.
-        let mut address = (self.base as usize + self.reserved) as u64;
-        // SAFETY: allocating fresh zeroed pages in our own task.
-        let kr = unsafe {
-            mach2::vm::mach_vm_allocate(
-                mach2::traps::mach_task_self(),
-                &mut address,
-                (reserved - self.reserved) as u64,
-                mach2::vm_statistics::VM_FLAGS_FIXED,
-            )
-        };
-        kr == mach2::kern_return::KERN_SUCCESS
-    }
-
-    #[cfg(not(target_vendor = "apple"))]
-    fn extend_in_place(&mut self, _reserved: usize) -> bool {
-        false
+        // Without MAP_FIXED the address is only a hint, honoured when the
+        // range is free, so nothing already mapped there is clobbered.
+        let hint = unsafe { self.base.add(self.reserved) };
+        let len = reserved - self.reserved;
+        match map_anonymous_at(hint, len) {
+            Ok(addr) if addr == hint => true,
+            Ok(addr) => {
+                unmap(addr, len);
+                false
+            }
+            Err(_) => false,
+        }
     }
 }
 
@@ -276,10 +269,17 @@ fn reservation(size: usize) -> Result<usize> {
 
 #[cfg(not(any(target_os = "redox", target_os = "linux")))]
 fn map_anonymous(len: usize) -> Result<*mut u8> {
-    // SAFETY: a fresh private mapping at a kernel-chosen address.
+    map_anonymous_at(ptr::null_mut(), len)
+}
+
+/// Map `len` zeroed bytes, at `hint` if that range is free.
+#[cfg(not(any(target_os = "redox", target_os = "linux")))]
+fn map_anonymous_at(hint: *mut u8, len: usize) -> Result<*mut u8> {
+    // SAFETY: a fresh private mapping; without MAP_FIXED the kernel never
+    // replaces existing mappings.
     let base = unsafe {
         libc::mmap(
-            ptr::null_mut(),
+            hint.cast(),
             len,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANON,

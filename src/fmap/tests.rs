@@ -306,3 +306,75 @@ fn fmap_fills_gaps_around_loaded_range() {
     assert_eq!(pages[4097], b'b');
     assert_eq!(pages[2 * 4096], b'c');
 }
+
+/// Growth past the reservation, when something is mapped right after it.
+#[cfg(not(any(target_os = "redox", target_os = "linux")))]
+#[test]
+fn buffer_grows_in_place_or_moves_only_when_allowed() {
+    use super::FmapBuffer;
+
+    let mut buffer = FmapBuffer::new(4096, 0).unwrap();
+    let base = buffer.base();
+    mapped(base, 5).copy_from_slice(b"keep!");
+    let reserved = 64 << 20;
+
+    // Occupy the range right after the reservation
+    let blocker = unsafe {
+        libc::mmap(
+            base.add(reserved).cast(),
+            4096,
+            libc::PROT_READ,
+            // A hint, not MAP_FIXED: never clobber whatever may be there
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+    assert_eq!(blocker, unsafe { base.add(reserved) }.cast());
+
+    // Mapped buffers cannot move, and must not clobber the neighbour
+    let err = buffer.grow(reserved + 4096, false).unwrap_err();
+    assert_eq!(err.errno, syscall::error::ENOMEM);
+    assert_eq!(buffer.base(), base);
+
+    unsafe { libc::munmap(blocker, 4096) };
+
+    // Once the neighbour is gone, growth happens in place
+    buffer.grow(reserved + 4096, false).unwrap();
+    assert_eq!(buffer.base(), base);
+    assert_eq!(buffer.size(), reserved + 4096);
+    assert_eq!(&mapped(base, 5)[..], b"keep!");
+    // The extension is usable
+    mapped(unsafe { base.add(reserved) }, 1)[0] = 1;
+}
+
+/// Unmapped buffers may move when they cannot grow in place.
+#[cfg(not(any(target_os = "redox", target_os = "linux")))]
+#[test]
+fn unmapped_buffer_moves_to_grow() {
+    use super::FmapBuffer;
+
+    let mut buffer = FmapBuffer::new(4096, 0).unwrap();
+    let base = buffer.base();
+    mapped(base, 5).copy_from_slice(b"keep!");
+    let reserved = 64 << 20;
+    let blocker = unsafe {
+        libc::mmap(
+            base.add(reserved).cast(),
+            4096,
+            libc::PROT_READ,
+            // A hint, not MAP_FIXED: never clobber whatever may be there
+            libc::MAP_PRIVATE | libc::MAP_ANON,
+            -1,
+            0,
+        )
+    };
+
+    assert_eq!(blocker, unsafe { base.add(reserved) }.cast());
+
+    buffer.grow(reserved + 4096, true).unwrap();
+
+    assert_ne!(buffer.base(), base);
+    assert_eq!(&mapped(buffer.base(), 5)[..], b"keep!");
+    unsafe { libc::munmap(blocker, 4096) };
+}
