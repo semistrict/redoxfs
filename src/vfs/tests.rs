@@ -473,6 +473,7 @@ fn setattr_changes_metadata() {
                 size: Some(5),
                 atime: Some(SetTime::At(time)),
                 mtime: Some(SetTime::At(time)),
+                kill_suid_sgid: false,
             },
         )
         .unwrap();
@@ -483,6 +484,28 @@ fn setattr_changes_metadata() {
     assert_eq!((attr.atime, attr.mtime), (time, time));
     assert_eq!(vfs.getattr(file).unwrap(), attr);
     assert_eq!(read_all(&vfs, file), b"hello");
+}
+
+#[test]
+fn kill_suid_sgid_follows_linux_rules() {
+    let vfs = new_vfs();
+    let kill = SetAttr {
+        kill_suid_sgid: true,
+        ..Default::default()
+    };
+    let perm = |perm| SetAttr {
+        perm: Some(perm),
+        ..Default::default()
+    };
+
+    let exec = create_file(&vfs, "exec", b"");
+    vfs.setattr(exec, perm(0o6755)).unwrap();
+    assert_eq!(vfs.setattr(exec, kill).unwrap().perm, 0o755);
+
+    // Without group execute, setgid marks mandatory locking and stays
+    let locked = create_file(&vfs, "locked", b"");
+    vfs.setattr(locked, perm(0o6644)).unwrap();
+    assert_eq!(vfs.setattr(locked, kill).unwrap().perm, 0o2644);
 }
 
 #[test]

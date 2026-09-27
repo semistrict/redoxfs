@@ -34,7 +34,9 @@ pub const ROOT_INO: u64 = 1;
 /// Fail if the target of a rename exists.
 pub const RENAME_NOREPLACE: u32 = 1 << 0;
 
+const S_ISUID: u16 = 0o4000;
 const S_ISGID: u16 = 0o2000;
+const S_IXGRP: u16 = 0o0010;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileKind {
@@ -157,6 +159,9 @@ pub struct SetAttr {
     pub size: Option<u64>,
     pub atime: Option<SetTime>,
     pub mtime: Option<SetTime>,
+    /// Clear setuid, and setgid if group-executable, as a write or chown by
+    /// an unprivileged process does. Applied before `perm`.
+    pub kill_suid_sgid: bool,
 }
 
 /// Credentials of the process creating a node, which will own it.
@@ -336,6 +341,16 @@ impl<D: Disk> Vfs<D> {
 
             let mut node = tx.read_tree(node_ptr)?;
             let data = node.data_mut();
+            let mut changed = false;
+            if set.kill_suid_sgid {
+                let mode = data.mode();
+                let mut killed = mode & !S_ISUID;
+                if mode & S_IXGRP != 0 {
+                    killed &= !S_ISGID;
+                }
+                changed |= killed != mode;
+                data.set_mode(killed);
+            }
             if let Some(perm) = set.perm {
                 data.set_mode((data.mode() & Node::MODE_TYPE) | (perm & Node::MODE_PERM));
             }
@@ -355,7 +370,8 @@ impl<D: Disk> Vfs<D> {
             }
 
             let attr = Attr::of(&node);
-            if set.perm.is_some()
+            if changed
+                || set.perm.is_some()
                 || set.uid.is_some()
                 || set.gid.is_some()
                 || set.atime.is_some()

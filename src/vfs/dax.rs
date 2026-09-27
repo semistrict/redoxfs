@@ -17,6 +17,8 @@ use std::os::fd::BorrowedFd;
 use crate::fmap::ranges::Value;
 
 /// The VMM side of a DAX window: installs cache pages into guest memory.
+///
+/// Errors are reported to the guest, so they must carry Linux errno values.
 pub trait DaxWindow {
     /// Make `source` visible to the guest at `window_offset` bytes into the
     /// window, replacing whatever was mapped there.

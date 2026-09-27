@@ -171,6 +171,8 @@ impl<D: Disk> Filesystem for Fuse<'_, D> {
             size,
             atime: atime.map(set_time),
             mtime: mtime.map(set_time),
+            // Without FUSE_HANDLE_KILLPRIV_V2 the kernel clears these itself
+            kill_suid_sgid: false,
         };
         match self.vfs.setattr(ino, set) {
             Ok(attr) => reply.attr(&TTL, &file_attr(&attr)),
