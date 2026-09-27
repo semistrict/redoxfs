@@ -1,4 +1,38 @@
-# RedoxFS
+# RedoxFS for FUSE and virtio-fs
+
+This fork of [RedoxFS](https://gitlab.redox-os.org/redox-os/redoxfs) serves
+RedoxFS images to Linux guests over virtio-fs, including DAX (guests map file
+pages directly), and mounts them with FUSE on Linux.
+
+- `redoxfs::fmap`: the page cache the Redox kernel borrows pages from when a
+  RedoxFS file is `mmap`ed (`Fmap`/`FileMmapInfo` from the Redox scheme), made
+  portable: buffers are memfds on Linux and address-stable memory on macOS, so
+  a VMM can map them into a guest.
+- `redoxfs::vfs::Vfs`: a thread-safe, FUSE-shaped view of a filesystem (inode
+  numbers, lookup counts, setattr, readdir handles, ...). `setup_mapping` and
+  `remove_mapping` implement `FUSE_SETUPMAPPING`/`FUSE_REMOVEMAPPING` against
+  a VMM-provided `DaxWindow`.
+- The `redoxfs` binary mounts images with FUSE through `Vfs`. FUSE is
+  Linux-only: FUSE on macOS requires proprietary software.
+- `vendor/libkrun` (a submodule, branch `redoxfs` of semistrict/libkrun) adds
+  `krun_add_virtiofs_redoxfs()`, built with `make REDOXFS=1`. In the guest:
+  `mount -t virtiofs <tag> /mnt -o dax=always`.
+
+Clone with `git clone --recursive`.
+
+### Testing
+
+```sh
+cargo nextest run                                   # macOS or Linux
+scripts/test-linux.sh                               # Linux in Lima: FUSE, memfd cache
+cargo +nightly check --target x86_64-unknown-redox  # the Redox scheme still builds
+# End to end: boot a VM that uses a RedoxFS image through DAX
+cd vendor/libkrun && make test REDOXFS=1 TEST=virtiofs-redoxfs
+```
+
+On macOS, libkrun's build needs `LIBCLANG_PATH` (e.g. `/opt/homebrew/opt/llvm/lib`).
+
+## Upstream RedoxFS
 
 This is the default filesystem of Redox OS inspired by [ZFS](https://docs.freebsd.org/en/books/handbook/zfs/) and adapted to a microkernel architecture.
 

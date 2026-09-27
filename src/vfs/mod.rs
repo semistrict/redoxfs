@@ -10,6 +10,7 @@
 //! `FUSE_ROOT_ID`. A node stays alive (even when unlinked) while the kernel
 //! holds lookups on it or any of its pages are mapped.
 
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -198,8 +199,8 @@ struct State<D: Disk> {
     fs: FileSystem<D>,
     fmaps: Fmaps,
     /// Kernel lookup count of each remembered inode.
-    lookups: alloc::collections::BTreeMap<u32, u64>,
-    dirs: alloc::collections::BTreeMap<u64, OpenDir>,
+    lookups: BTreeMap<u32, u64>,
+    dirs: BTreeMap<u64, OpenDir>,
     next_handle: u64,
     /// What backs each mapped part of the DAX window.
     grants: RangeMap<Grant>,
@@ -276,18 +277,16 @@ impl<D: Disk> Vfs<D> {
         Ok(state.fs)
     }
 
-    /// Remember one more kernel reference to `node`.
-    fn remember(
-        lookups: &mut alloc::collections::BTreeMap<u32, u64>,
-        tx: &mut crate::Transaction<D>,
-        node: TreePtr<Node>,
-    ) -> Result<()> {
-        let count = lookups.entry(node.id()).or_insert(0);
+    /// Remember one more kernel reference to the node `attr` describes,
+    /// once the operation that returns it has committed.
+    fn remember(state: &mut State<D>, attr: Attr) -> Result<Attr> {
+        let node = TreePtr::<Node>::new(attr.ino as u32);
+        let count = state.lookups.entry(node.id()).or_insert(0);
         if *count == 0 {
-            tx.on_open_node(node)?;
+            state.fs.tx(|tx| tx.on_open_node(node))?;
         }
         *count += 1;
-        Ok(())
+        Ok(attr)
     }
 
     /// Look up `name` in `parent`, taking a lookup reference on the result.
@@ -295,12 +294,10 @@ impl<D: Disk> Vfs<D> {
         let parent = node_ptr(parent)?;
         let name = name_str(name)?;
         let state = &mut *self.state();
-        let lookups = &mut state.lookups;
-        state.fs.tx(|tx| {
-            let node = tx.find_node(parent, name)?;
-            Self::remember(lookups, tx, node.ptr())?;
-            Ok(Attr::of(&node))
-        })
+        let attr = state
+            .fs
+            .tx(|tx| Ok(Attr::of(&tx.find_node(parent, name)?)))?;
+        Self::remember(state, attr)
     }
 
     /// Drop `count` lookup references to `ino`.
@@ -414,8 +411,7 @@ impl<D: Disk> Vfs<D> {
         let parent_ptr = node_ptr(parent)?;
         let name = name_str(name)?;
         let state = &mut *self.state();
-        let lookups = &mut state.lookups;
-        state.fs.tx(|tx| {
+        let attr = state.fs.tx(|tx| {
             let parent = tx.read_tree(parent_ptr)?;
             if !parent.data().is_dir() {
                 return Err(Error::new(ENOTDIR));
@@ -444,9 +440,9 @@ impl<D: Disk> Vfs<D> {
             if !contents.is_empty() {
                 tx.write_node(node_ptr, 0, contents, now.secs, now.nanos)?;
             }
-            Self::remember(lookups, tx, node_ptr)?;
             Ok(Attr::of(&tx.read_tree(node_ptr)?))
-        })
+        })?;
+        Self::remember(state, attr)
     }
 
     /// Create a regular file (the FUSE `create` operation, minus the open).
@@ -490,16 +486,15 @@ impl<D: Disk> Vfs<D> {
         let new_parent = self::node_ptr(new_parent)?;
         let new_name = name_str(new_name)?;
         let state = &mut *self.state();
-        let lookups = &mut state.lookups;
-        state.fs.tx(|tx| {
+        let attr = state.fs.tx(|tx| {
             if tx.read_tree(node_ptr)?.data().is_dir() {
                 return Err(Error::new(EPERM));
             }
             tx.check_name(&new_parent, new_name)?;
             tx.link_node(new_parent, new_name, node_ptr)?;
-            Self::remember(lookups, tx, node_ptr)?;
             Ok(Attr::of(&tx.read_tree(node_ptr)?))
-        })
+        })?;
+        Self::remember(state, attr)
     }
 
     pub fn unlink(&self, parent: u64, name: &[u8]) -> Result<()> {
