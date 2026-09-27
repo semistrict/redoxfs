@@ -44,7 +44,7 @@ pub use self::buffer::FmapBuffer;
 use self::ranges::{RangeMap, Value};
 
 mod buffer;
-mod ranges;
+pub(crate) mod ranges;
 #[cfg(test)]
 mod tests;
 

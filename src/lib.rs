@@ -67,6 +67,8 @@ mod transaction;
 mod tree;
 #[cfg(feature = "std")]
 mod unmount;
+#[cfg(all(feature = "std", not(target_os = "redox")))]
+pub mod vfs;
 
 #[cfg(all(feature = "std", test))]
 mod tests;
