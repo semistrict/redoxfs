@@ -52,6 +52,11 @@ pub trait Disk {
 
     /// Get size of disk in bytes
     fn size(&mut self) -> Result<u64>;
+
+    /// Flush written blocks to stable storage
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl Disk for Box<dyn Disk> {
@@ -71,5 +76,9 @@ impl Disk for Box<dyn Disk> {
         {
             (**self).size()
         }
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        (**self).flush()
     }
 }

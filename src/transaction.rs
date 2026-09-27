@@ -1517,7 +1517,8 @@ impl<'a, D: Disk> Transaction<'a, D> {
         Ok(())
     }
 
-    fn check_name(&mut self, parent_ptr: &TreePtr<Node>, name: &str) -> Result<()> {
+    /// Check that `name` is valid and does not exist in `parent_ptr`.
+    pub fn check_name(&mut self, parent_ptr: &TreePtr<Node>, name: &str) -> Result<()> {
         if name.contains(':') {
             return Err(Error::new(EINVAL));
         }

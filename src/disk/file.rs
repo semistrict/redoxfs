@@ -75,6 +75,10 @@ impl Disk for DiskFile {
     fn size(&mut self) -> Result<u64> {
         self.file.seek(SeekFrom::End(0)).or_eio()
     }
+
+    fn flush(&mut self) -> Result<()> {
+        self.file.sync_data().or_eio()
+    }
 }
 
 impl From<File> for DiskFile {

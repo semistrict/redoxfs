@@ -132,4 +132,8 @@ impl<T: Disk> Disk for DiskCache<T> {
     fn size(&mut self) -> Result<u64> {
         self.inner.size()
     }
+
+    fn flush(&mut self) -> Result<()> {
+        self.inner.flush()
+    }
 }
