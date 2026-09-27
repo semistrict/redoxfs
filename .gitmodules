@@ -1,0 +1,4 @@
+[submodule "vendor/libkrun"]
+	path = vendor/libkrun
+	url = git@github.com:semistrict/libkrun.git
+	branch = redoxfs
