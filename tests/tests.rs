@@ -669,3 +669,63 @@ fn temporary_file() {
         assert_eq!(read_data, write_data);
     });
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn fuse_links_renames_and_metadata() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    with_mounted(|path| {
+        let a = path.join("a");
+        fs::write(&a, b"alpha").unwrap();
+        let meta = fs::metadata(&a).unwrap();
+        assert_eq!(meta.uid(), unsafe { libc::getuid() });
+        assert_eq!(meta.gid(), unsafe { libc::getgid() });
+
+        // Hard link, then rename another file over it
+        fs::hard_link(&a, path.join("b")).unwrap();
+        assert_eq!(fs::metadata(&a).unwrap().nlink(), 2);
+        fs::write(path.join("c"), b"gamma").unwrap();
+        fs::rename(path.join("c"), path.join("b")).unwrap();
+        assert_eq!(fs::read(path.join("b")).unwrap(), b"gamma");
+        assert_eq!(fs::metadata(&a).unwrap().nlink(), 1);
+
+        // chmod and truncate
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(fs::metadata(&a).unwrap().mode(), 0o100600);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&a)
+            .unwrap()
+            .set_len(2)
+            .unwrap();
+        assert_eq!(fs::read(&a).unwrap(), b"al");
+
+        // Directory listings report symlinks as symlinks
+        std::os::unix::fs::symlink("a", path.join("link")).unwrap();
+        fs::create_dir(path.join("dir")).unwrap();
+        let mut entries: Vec<(String, bool, bool)> = fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                (
+                    entry.file_name().into_string().unwrap(),
+                    kind.is_dir(),
+                    kind.is_symlink(),
+                )
+            })
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            [
+                ("a".to_string(), false, false),
+                ("b".to_string(), false, false),
+                ("dir".to_string(), true, false),
+                ("link".to_string(), false, true),
+            ]
+        );
+        assert_eq!(fs::read(path.join("link")).unwrap(), b"al");
+    });
+}

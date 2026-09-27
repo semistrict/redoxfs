@@ -1,31 +1,23 @@
 extern crate fuser;
 
-use std::cmp;
 use std::ffi::OsStr;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-use self::fuser::MountOption;
-use self::fuser::TimeOrNow;
-use crate::mount::fuse::TimeOrNow::Now;
-use crate::mount::fuse::TimeOrNow::SpecificTime;
-
-use crate::{filesystem, Disk, Node, TreeData, TreePtr, BLOCK_SIZE};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use self::fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, Session,
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite, Request, Session, TimeOrNow,
 };
-use std::time::Duration;
+
+use crate::vfs::{Attr, Creds, FileKind, SetAttr, SetTime, Timespec, Vfs};
+use crate::{filesystem, Disk};
 
 const TTL: Duration = Duration::new(1, 0); // 1 second
 
-const NULL_TIME: Duration = Duration::new(0, 0);
-
 pub fn mount<D, P, T, F>(
-    mut filesystem: filesystem::FileSystem<D>,
+    filesystem: filesystem::FileSystem<D>,
     mountpoint: P,
     callback: F,
 ) -> io::Result<T>
@@ -38,14 +30,6 @@ where
 
     let mut options = Vec::new();
 
-    // One of the uses of this redoxfs fuse wrapper is to populate a filesystem
-    // while building the Redox OS kernel. This means that we need to write on
-    // a filesystem that belongs to `root`, which in turn means that we need to
-    // be `root`, thus that we need to allow `root` to have access.
-    if cfg!(target_os = "macos") {
-        options.push(MountOption::CUSTOM("defer_permissions".to_owned()));
-    }
-
     // This allows redoxfs being run as root (e.g. mounting /dev partition)
     // then accessing it from non root account, with built-in file access check.
     if std::env::var("REDOXFS_FUSE_SHARE").is_ok_and(|s| s == "1") {
@@ -54,14 +38,9 @@ where
         options.push(MountOption::DefaultPermissions);
     }
 
+    let vfs = Vfs::new(filesystem);
     let res = {
-        let mut session = Session::new(
-            Fuse {
-                fs: &mut filesystem,
-            },
-            mountpoint,
-            &options,
-        )?;
+        let mut session = Session::new(Fuse { vfs: &vfs }, mountpoint, &options)?;
 
         let res = callback(mountpoint);
 
@@ -70,75 +49,107 @@ where
         res
     };
 
-    // Cleanup on unmount
-    filesystem.cleanup()?;
+    // Write back and clean up on unmount
+    vfs.unmount()?;
 
     Ok(res)
 }
 
 pub struct Fuse<'f, D: Disk> {
-    pub fs: &'f mut filesystem::FileSystem<D>,
+    pub vfs: &'f Vfs<D>,
 }
 
-fn node_attr(node: &TreeData<Node>) -> FileAttr {
+fn system_time(time: Timespec) -> SystemTime {
+    UNIX_EPOCH + Duration::new(time.secs, time.nanos)
+}
+
+fn file_type(kind: FileKind) -> FileType {
+    match kind {
+        FileKind::File => FileType::RegularFile,
+        FileKind::Directory => FileType::Directory,
+        FileKind::Symlink => FileType::Symlink,
+        FileKind::Socket => FileType::Socket,
+    }
+}
+
+fn file_attr(attr: &Attr) -> FileAttr {
     FileAttr {
-        ino: node.id() as u64,
-        size: node.data().size(),
-        // Blocks is in 512 byte blocks, not in our block size
-        blocks: node.data().blocks() * (BLOCK_SIZE / 512),
-        blksize: 512,
-        atime: SystemTime::UNIX_EPOCH + Duration::new(node.data().atime().0, node.data().atime().1),
-        mtime: SystemTime::UNIX_EPOCH + Duration::new(node.data().mtime().0, node.data().mtime().1),
-        ctime: SystemTime::UNIX_EPOCH + Duration::new(node.data().ctime().0, node.data().ctime().1),
-        crtime: UNIX_EPOCH + NULL_TIME,
-        kind: if node.data().is_dir() {
-            FileType::Directory
-        } else if node.data().is_symlink() {
-            FileType::Symlink
-        } else {
-            FileType::RegularFile
-        },
-        perm: node.data().mode() & Node::MODE_PERM,
-        nlink: node.data().links(),
-        uid: node.data().uid(),
-        gid: node.data().gid(),
+        ino: attr.ino,
+        size: attr.size,
+        blocks: attr.blocks,
+        atime: system_time(attr.atime),
+        mtime: system_time(attr.mtime),
+        ctime: system_time(attr.ctime),
+        crtime: UNIX_EPOCH,
+        kind: file_type(attr.kind),
+        perm: attr.perm,
+        nlink: attr.nlink,
+        uid: attr.uid,
+        gid: attr.gid,
         rdev: 0,
+        blksize: attr.blksize,
         flags: 0,
     }
 }
 
-impl<D: Disk> Filesystem for Fuse<'_, D> {
-    fn lookup(&mut self, _req: &Request, parent_id: u64, name: &OsStr, reply: ReplyEntry) {
-        let parent_ptr = TreePtr::new(parent_id as u32);
-        match self
-            .fs
-            .tx(|tx| tx.find_node(parent_ptr, name.to_str().unwrap()))
-        {
-            Ok(node) => {
-                reply.entry(&TTL, &node_attr(&node), 0);
-            }
-            Err(err) => {
-                reply.error(err.errno);
-            }
+fn set_time(time: TimeOrNow) -> SetTime {
+    match time {
+        TimeOrNow::Now => SetTime::Now,
+        TimeOrNow::SpecificTime(time) => {
+            let time = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+            SetTime::At(Timespec {
+                secs: time.as_secs(),
+                nanos: time.subsec_nanos(),
+            })
         }
     }
+}
 
-    fn getattr(&mut self, _req: &Request, node_id: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let node_ptr = TreePtr::<Node>::new(node_id as u32);
-        match self.fs.tx(|tx| tx.read_tree(node_ptr)) {
-            Ok(node) => {
-                reply.attr(&TTL, &node_attr(&node));
-            }
-            Err(err) => {
-                reply.error(err.errno);
-            }
+fn creds(req: &Request) -> Creds {
+    Creds {
+        uid: req.uid(),
+        gid: req.gid(),
+    }
+}
+
+fn offset(offset: i64) -> u64 {
+    offset.max(0) as u64
+}
+
+fn reply_entry(reply: ReplyEntry, result: syscall::error::Result<Attr>) {
+    match result {
+        Ok(attr) => reply.entry(&TTL, &file_attr(&attr), 0),
+        Err(err) => reply.error(err.errno),
+    }
+}
+
+fn reply_empty(reply: ReplyEmpty, result: syscall::error::Result<()>) {
+    match result {
+        Ok(()) => reply.ok(),
+        Err(err) => reply.error(err.errno),
+    }
+}
+
+impl<D: Disk> Filesystem for Fuse<'_, D> {
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        reply_entry(reply, self.vfs.lookup(parent, name.as_bytes()));
+    }
+
+    fn forget(&mut self, _req: &Request, ino: u64, nlookup: u64) {
+        self.vfs.forget(ino, nlookup);
+    }
+
+    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+        match self.vfs.getattr(ino) {
+            Ok(attr) => reply.attr(&TTL, &file_attr(&attr)),
+            Err(err) => reply.error(err.errno),
         }
     }
 
     fn setattr(
         &mut self,
         _req: &Request,
-        node_id: u64,
+        ino: u64,
         mode: Option<u32>,
         uid: Option<u32>,
         gid: Option<u32>,
@@ -153,98 +164,123 @@ impl<D: Disk> Filesystem for Fuse<'_, D> {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        let node_ptr = TreePtr::<Node>::new(node_id as u32);
-
-        let mut node = match self.fs.tx(|tx| tx.read_tree(node_ptr)) {
-            Ok(ok) => ok,
-            Err(err) => {
-                reply.error(err.errno);
-                return;
-            }
+        let set = SetAttr {
+            perm: mode.map(|mode| mode as u16),
+            uid,
+            gid,
+            size,
+            atime: atime.map(set_time),
+            mtime: mtime.map(set_time),
         };
-        let mut node_changed = false;
-
-        if let Some(mode) = mode {
-            if node.data().mode() & Node::MODE_PERM != mode as u16 & Node::MODE_PERM {
-                let new_mode =
-                    (node.data().mode() & Node::MODE_TYPE) | (mode as u16 & Node::MODE_PERM);
-                node.data_mut().set_mode(new_mode);
-                node_changed = true;
-            }
-        }
-
-        if let Some(uid) = uid {
-            if node.data().uid() != uid {
-                node.data_mut().set_uid(uid);
-                node_changed = true;
-            }
-        }
-
-        if let Some(gid) = gid {
-            if node.data().gid() != gid {
-                node.data_mut().set_gid(gid);
-                node_changed = true;
-            }
-        }
-
-        if let Some(atime) = atime {
-            let atime_c = match atime {
-                SpecificTime(st) => st.duration_since(UNIX_EPOCH).unwrap(),
-                Now => SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
-            };
-            node.data_mut()
-                .set_atime(atime_c.as_secs(), atime_c.subsec_nanos());
-            node_changed = true;
-        }
-
-        if let Some(mtime) = mtime {
-            let mtime_c = match mtime {
-                SpecificTime(st) => st.duration_since(UNIX_EPOCH).unwrap(),
-                Now => SystemTime::now().duration_since(UNIX_EPOCH).unwrap(),
-            };
-            node.data_mut()
-                .set_mtime(mtime_c.as_secs(), mtime_c.subsec_nanos());
-            node_changed = true;
-        }
-
-        if let Some(size) = size {
-            match self.fs.tx(|tx| tx.truncate_node_inner(&mut node, size)) {
-                Ok(ok) => {
-                    if ok {
-                        node_changed = true;
-                    }
-                }
-                Err(err) => {
-                    reply.error(err.errno);
-                    return;
-                }
-            }
-        }
-
-        let attr = node_attr(&node);
-
-        if node_changed {
-            if let Err(err) = self.fs.tx(|tx| tx.sync_tree(node)) {
-                reply.error(err.errno);
-                return;
-            }
-        }
-
-        reply.attr(&TTL, &attr);
-    }
-
-    fn open(&mut self, _req: &Request<'_>, node_id: u64, _flags: i32, reply: ReplyOpen) {
-        let node_ptr = TreePtr::<Node>::new(node_id as u32);
-        match self.fs.tx(|tx| tx.on_open_node(node_ptr)) {
-            Ok(()) => reply.opened(0, 0),
+        match self.vfs.setattr(ino, set) {
+            Ok(attr) => reply.attr(&TTL, &file_attr(&attr)),
             Err(err) => reply.error(err.errno),
         }
+    }
+
+    fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+        match self.vfs.readlink(ino) {
+            Ok(target) => reply.data(&target),
+            Err(err) => reply.error(err.errno),
+        }
+    }
+
+    fn mknod(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        reply_entry(
+            reply,
+            self.vfs.mknod(creds(req), parent, name.as_bytes(), mode),
+        );
+    }
+
+    fn mkdir(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        reply_entry(
+            reply,
+            self.vfs
+                .mkdir(creds(req), parent, name.as_bytes(), mode as u16),
+        );
+    }
+
+    fn unlink(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        reply_empty(reply, self.vfs.unlink(parent, name.as_bytes()));
+    }
+
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        reply_empty(reply, self.vfs.rmdir(parent, name.as_bytes()));
+    }
+
+    fn symlink(
+        &mut self,
+        req: &Request,
+        parent: u64,
+        link_name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        reply_entry(
+            reply,
+            self.vfs.symlink(
+                creds(req),
+                parent,
+                link_name.as_bytes(),
+                target.as_os_str().as_bytes(),
+            ),
+        );
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        reply_empty(
+            reply,
+            self.vfs.rename(
+                parent,
+                name.as_bytes(),
+                newparent,
+                newname.as_bytes(),
+                flags,
+            ),
+        );
+    }
+
+    fn link(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        reply_entry(reply, self.vfs.link(ino, newparent, newname.as_bytes()));
     }
 
     fn read(
         &mut self,
         _req: &Request,
-        node_id: u64,
+        ino: u64,
         _fh: u64,
         offset: i64,
         size: u32,
@@ -252,32 +288,17 @@ impl<D: Disk> Filesystem for Fuse<'_, D> {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let node_ptr = TreePtr::<Node>::new(node_id as u32);
-
-        let atime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let mut data = vec![0; size as usize];
-        match self.fs.tx(|tx| {
-            tx.read_node(
-                node_ptr,
-                cmp::max(0, offset) as u64,
-                &mut data,
-                atime.as_secs(),
-                atime.subsec_nanos(),
-            )
-        }) {
-            Ok(count) => {
-                reply.data(&data[..count]);
-            }
-            Err(err) => {
-                reply.error(err.errno);
-            }
+        match self.vfs.read(ino, self::offset(offset), &mut data) {
+            Ok(count) => reply.data(&data[..count]),
+            Err(err) => reply.error(err.errno),
         }
     }
 
     fn write(
         &mut self,
         _req: &Request,
-        node_id: u64,
+        ino: u64,
         _fh: u64,
         offset: i64,
         data: &[u8],
@@ -286,24 +307,9 @@ impl<D: Disk> Filesystem for Fuse<'_, D> {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let node_ptr = TreePtr::<Node>::new(node_id as u32);
-
-        let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        match self.fs.tx(|tx| {
-            tx.write_node(
-                node_ptr,
-                cmp::max(0, offset) as u64,
-                data,
-                mtime.as_secs(),
-                mtime.subsec_nanos(),
-            )
-        }) {
-            Ok(count) => {
-                reply.written(count as u32);
-            }
-            Err(err) => {
-                reply.error(err.errno);
-            }
+        match self.vfs.write(ino, self::offset(offset), data) {
+            Ok(count) => reply.written(count as u32),
+            Err(err) => reply.error(err.errno),
         }
     }
 
@@ -311,277 +317,82 @@ impl<D: Disk> Filesystem for Fuse<'_, D> {
         reply.ok();
     }
 
-    fn release(
-        &mut self,
-        _req: &Request,
-        node_id: u64,
-        _fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
-        _flush: bool,
-        reply: ReplyEmpty,
-    ) {
-        let node_ptr = TreePtr::new(node_id as u32);
-        match self.fs.tx(|tx| tx.on_close_node(node_ptr)) {
-            Ok(()) => reply.ok(),
-            Err(err) => reply.error(err.errno),
-        }
+    fn fsync(&mut self, _req: &Request, ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        reply_empty(reply, self.vfs.fsync(ino));
     }
 
-    fn fsync(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
-        reply.ok();
+    fn opendir(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+        match self.vfs.opendir(ino) {
+            Ok(handle) => reply.opened(handle, 0),
+            Err(err) => reply.error(err.errno),
+        }
     }
 
     fn readdir(
         &mut self,
         _req: &Request,
-        parent_id: u64,
-        _fh: u64,
+        _ino: u64,
+        fh: u64,
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let parent_ptr = TreePtr::new(parent_id as u32);
-        let mut children = Vec::new();
-        match self.fs.tx(|tx| tx.child_nodes(parent_ptr, &mut children)) {
-            Ok(()) => {
-                let mut i;
-                let skip;
-                if offset == 0 {
-                    skip = 0;
-                    i = 0;
-                    let _full = reply.add(parent_id, i, FileType::Directory, ".");
-
-                    i += 1;
-                    let _full = reply.add(
-                        //TODO: get parent?
-                        parent_id,
-                        i,
-                        FileType::Directory,
-                        "..",
-                    );
-                    i += 1;
-                } else {
-                    i = offset + 1;
-                    skip = offset as usize - 1;
-                }
-
-                for child in children.iter().skip(skip) {
-                    //TODO: make it possible to get file type from directory entry
-                    let node = match self.fs.tx(|tx| tx.read_tree(child.node_ptr())) {
-                        Ok(ok) => ok,
-                        Err(err) => {
-                            reply.error(err.errno);
-                            return;
-                        }
-                    };
-
-                    let full = reply.add(
-                        child.node_ptr().id() as u64,
-                        i,
-                        if node.data().is_dir() {
-                            FileType::Directory
-                        } else {
-                            FileType::RegularFile
-                        },
-                        child.name().unwrap(),
-                    );
-
-                    if full {
-                        break;
-                    }
-
-                    i += 1;
-                }
-                reply.ok();
-            }
-            Err(err) => {
-                reply.error(err.errno);
+        let offset = self::offset(offset);
+        let entries = match self.vfs.readdir(fh, offset) {
+            Ok(entries) => entries,
+            Err(err) => return reply.error(err.errno),
+        };
+        for (i, entry) in entries.iter().enumerate().skip(offset as usize) {
+            let full = reply.add(
+                entry.ino,
+                i as i64 + 1,
+                file_type(entry.kind),
+                OsStr::from_bytes(&entry.name),
+            );
+            if full {
+                break;
             }
         }
+        reply.ok();
+    }
+
+    fn releasedir(&mut self, _req: &Request, _ino: u64, fh: u64, _flags: i32, reply: ReplyEmpty) {
+        self.vfs.releasedir(fh);
+        reply.ok();
+    }
+
+    fn fsyncdir(&mut self, _req: &Request, ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        reply_empty(reply, self.vfs.fsync(ino));
+    }
+
+    fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
+        let statfs = self.vfs.statfs();
+        reply.statfs(
+            statfs.blocks,
+            statfs.blocks_free,
+            statfs.blocks_free,
+            0,
+            0,
+            statfs.block_size,
+            statfs.name_max,
+            statfs.block_size,
+        );
     }
 
     fn create(
         &mut self,
-        _req: &Request,
-        parent_id: u64,
+        req: &Request,
+        parent: u64,
         name: &OsStr,
         mode: u32,
         _umask: u32,
         _flags: i32,
         reply: ReplyCreate,
     ) {
-        let parent_ptr = TreePtr::<Node>::new(parent_id as u32);
-        let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        match self.fs.tx(|tx| {
-            let node = tx.create_node(
-                parent_ptr,
-                name.to_str().unwrap(),
-                Node::MODE_FILE | (mode as u16 & Node::MODE_PERM),
-                ctime.as_secs(),
-                ctime.subsec_nanos(),
-            )?;
-            tx.on_open_node(node.ptr())?;
-            Ok(node)
-        }) {
-            Ok(node) => {
-                // println!("Create {:?}:{:o}:{:o}", node.1.name(), node.1.mode, mode);
-                reply.created(&TTL, &node_attr(&node), 0, 0, 0);
-            }
-            Err(error) => {
-                reply.error(error.errno);
-            }
-        }
-    }
-
-    fn mkdir(
-        &mut self,
-        _req: &Request,
-        parent_id: u64,
-        name: &OsStr,
-        mode: u32,
-        _umask: u32,
-        reply: ReplyEntry,
-    ) {
-        let parent_ptr = TreePtr::<Node>::new(parent_id as u32);
-        let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        match self.fs.tx(|tx| {
-            tx.create_node(
-                parent_ptr,
-                name.to_str().unwrap(),
-                Node::MODE_DIR | (mode as u16 & Node::MODE_PERM),
-                ctime.as_secs(),
-                ctime.subsec_nanos(),
-            )
-        }) {
-            Ok(node) => {
-                // println!("Mkdir {:?}:{:o}:{:o}", node.1.name(), node.1.mode, mode);
-                reply.entry(&TTL, &node_attr(&node), 0);
-            }
-            Err(error) => {
-                reply.error(error.errno);
-            }
-        }
-    }
-
-    fn rmdir(&mut self, _req: &Request, parent_id: u64, name: &OsStr, reply: ReplyEmpty) {
-        let parent_ptr = TreePtr::<Node>::new(parent_id as u32);
         match self
-            .fs
-            .tx(|tx| tx.remove_node(parent_ptr, name.to_str().unwrap(), Node::MODE_DIR))
+            .vfs
+            .create(creds(req), parent, name.as_bytes(), mode as u16)
         {
-            Ok(_) => {
-                reply.ok();
-            }
-            Err(err) => {
-                reply.error(err.errno);
-            }
-        }
-    }
-
-    fn unlink(&mut self, _req: &Request, parent_id: u64, name: &OsStr, reply: ReplyEmpty) {
-        let parent_ptr = TreePtr::<Node>::new(parent_id as u32);
-        match self
-            .fs
-            .tx(|tx| tx.remove_node(parent_ptr, name.to_str().unwrap(), Node::MODE_FILE))
-        {
-            Ok(_) => {
-                reply.ok();
-            }
-            Err(err) => {
-                reply.error(err.errno);
-            }
-        }
-    }
-
-    fn statfs(&mut self, _req: &Request, _ino: u64, reply: ReplyStatfs) {
-        let bsize = BLOCK_SIZE;
-        let blocks = self.fs.header.size() / bsize;
-        let bfree = self.fs.allocator().free();
-        reply.statfs(blocks, bfree, bfree, 0, 0, bsize as u32, 256, 0);
-    }
-
-    fn symlink(
-        &mut self,
-        _req: &Request,
-        parent_id: u64,
-        name: &OsStr,
-        link: &Path,
-        reply: ReplyEntry,
-    ) {
-        let parent_ptr = TreePtr::<Node>::new(parent_id as u32);
-        let ctime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        match self.fs.tx(|tx| {
-            let node = tx.create_node(
-                parent_ptr,
-                name.to_str().unwrap(),
-                Node::MODE_SYMLINK | 0o777,
-                ctime.as_secs(),
-                ctime.subsec_nanos(),
-            )?;
-
-            let mtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            tx.write_node(
-                node.ptr(),
-                0,
-                link.as_os_str().as_bytes(),
-                mtime.as_secs(),
-                mtime.subsec_nanos(),
-            )?;
-
-            Ok(node)
-        }) {
-            Ok(node) => {
-                reply.entry(&TTL, &node_attr(&node), 0);
-            }
-            Err(error) => {
-                reply.error(error.errno);
-            }
-        }
-    }
-
-    fn readlink(&mut self, _req: &Request, node_id: u64, reply: ReplyData) {
-        let node_ptr = TreePtr::<Node>::new(node_id as u32);
-        let atime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let mut data = vec![0; 4096];
-        match self.fs.tx(|tx| {
-            tx.read_node(
-                node_ptr,
-                0,
-                &mut data,
-                atime.as_secs(),
-                atime.subsec_nanos(),
-            )
-        }) {
-            Ok(count) => {
-                reply.data(&data[..count]);
-            }
-            Err(err) => {
-                reply.error(err.errno);
-            }
-        }
-    }
-
-    fn rename(
-        &mut self,
-        _req: &Request,
-        orig_parent: u64,
-        orig_name: &OsStr,
-        new_parent: u64,
-        new_name: &OsStr,
-        _flags: u32,
-        reply: ReplyEmpty,
-    ) {
-        let orig_parent_ptr = TreePtr::<Node>::new(orig_parent as u32);
-        let orig_name = orig_name.to_str().expect("name is not utf-8");
-        let new_parent_ptr = TreePtr::<Node>::new(new_parent as u32);
-        let new_name = new_name.to_str().expect("name is not utf-8");
-
-        // TODO: improve performance
-        match self
-            .fs
-            .tx(|tx| tx.rename_node(orig_parent_ptr, orig_name, new_parent_ptr, new_name))
-        {
-            Ok(()) => reply.ok(),
+            Ok(attr) => reply.created(&TTL, &file_attr(&attr), 0, 0, 0),
             Err(err) => reply.error(err.errno),
         }
     }

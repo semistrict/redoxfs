@@ -16,7 +16,7 @@ use std::{
 };
 use tempfile;
 
-use redoxfs::{mount::fuse::Fuse, DiskSparse, FileSystem};
+use redoxfs::{mount::fuse::Fuse, vfs::Vfs, DiskSparse, FileSystem};
 
 /// Maximum size for files and buffers. Chosen arbitrarily with fuzzing performance in mind.
 const MAX_SIZE: u64 = 10_000_000;
@@ -139,11 +139,12 @@ where
 {
     let password = None;
     let block = None;
-    let mut fs = FileSystem::open(disk, password, block, cleanup).unwrap();
+    let fs = FileSystem::open(disk, password, block, cleanup).unwrap();
+    let vfs = Vfs::new(fs);
 
     let mount_path = temp_path.join("mount");
     fs::create_dir_all(&mount_path).unwrap();
-    let mut session = fuser::Session::new(Fuse { fs: &mut fs }, &mount_path, &[]).unwrap();
+    let mut session = fuser::Session::new(Fuse { vfs: &vfs }, &mount_path, &[]).unwrap();
     let mut unmounter = session.unmount_callable();
 
     let join_handle = thread::spawn(move || {
@@ -153,6 +154,8 @@ where
 
     session.run().unwrap();
     join_handle.join().unwrap();
+    drop(session);
+    vfs.unmount().unwrap();
 }
 
 fn get_path_within_fs(fs_path: &Path, path_to_add: &Path) -> Result<PathBuf> {
