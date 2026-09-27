@@ -14,6 +14,6 @@ where
 {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "FUSE mount feature is disabled",
+        "FUSE mount requires Linux and the `fuse` feature",
     ))
 }

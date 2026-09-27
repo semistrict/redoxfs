@@ -18,7 +18,11 @@ where
     T: Send + Sync + 'static,
     F: FnOnce(&str) -> T + Send + Sync + 'static,
 {
-    let disk_path = format!("image{}.bin", IMAGE_SEQ.fetch_add(1, Relaxed));
+    let disk_path = format!(
+        "image{}-{}.bin",
+        std::process::id(),
+        IMAGE_SEQ.fetch_add(1, Relaxed)
+    );
 
     {
         let disk = DiskSparse::create(dbg!(&disk_path), 1024 * 1024 * 1024).unwrap();
@@ -32,12 +36,18 @@ where
     res
 }
 
+// FUSE mounts are only available on Linux (and the Redox scheme).
+#[cfg(any(target_os = "linux", target_os = "redox"))]
 fn with_mounted<T, F>(callback: F) -> T
 where
     T: Send + Sync + 'static,
     F: FnOnce(&Path) -> T + Send + Sync + 'static,
 {
-    let mount_path_o = format!("image{}", IMAGE_SEQ.fetch_add(1, Relaxed));
+    let mount_path_o = format!(
+        "image{}-{}",
+        std::process::id(),
+        IMAGE_SEQ.fetch_add(1, Relaxed)
+    );
     let mount_path = mount_path_o.clone();
 
     let res = with_redoxfs(move |fs| {
@@ -130,6 +140,7 @@ where
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "redox"))]
 fn simple() {
     with_mounted(|path| {
         dbg!(fs::create_dir(path.join("test"))).unwrap();
@@ -137,6 +148,7 @@ fn simple() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "redox"))]
 fn create_and_remove_file() {
     with_mounted(|path| {
         let file_name = "test_file.txt";
@@ -157,6 +169,7 @@ fn create_and_remove_file() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "redox"))]
 fn create_and_remove_directory() {
     with_mounted(|path| {
         let dir_name = "test_dir";
@@ -197,6 +210,7 @@ fn create_and_remove_directory() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "redox"))]
 fn create_and_remove_symlink() {
     with_mounted(|path| {
         let real_file = "real_file.txt";
@@ -404,6 +418,7 @@ fn many_create_write_list_find_read_delete() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "redox"))]
 fn many_write_read_delete_mounted() {
     with_mounted(|path| {
         let total_count = 500;
@@ -633,6 +648,7 @@ fn rename_works() {
 }
 
 #[test]
+#[cfg(any(target_os = "linux", target_os = "redox"))]
 fn temporary_file() {
     with_mounted(|path| {
         let file_path = path.join("temp");

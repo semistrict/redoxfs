@@ -15,7 +15,11 @@ where
     T: Send + Sync + 'static,
     F: FnOnce(FileSystem<DiskSparse>) -> T + Send + Sync + 'static,
 {
-    let disk_path = format!("image{}.bin", IMAGE_SEQ.fetch_add(1, Relaxed));
+    let disk_path = format!(
+        "image{}-{}.bin",
+        std::process::id(),
+        IMAGE_SEQ.fetch_add(1, Relaxed)
+    );
 
     let res = {
         let disk = DiskSparse::create(dbg!(&disk_path), 1024 * 1024 * 1024).unwrap();

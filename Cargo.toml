@@ -84,7 +84,8 @@ std = [
     "smallvec",
 ]
 
-[target.'cfg(not(target_os = "redox"))'.dependencies]
+# FUSE is Linux-only: on macOS it requires proprietary macFUSE/FUSE-T.
+[target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.16", optional = true }
 
 [target.'cfg(target_os = "redox")'.dependencies]
